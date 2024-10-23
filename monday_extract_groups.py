@@ -184,3 +184,136 @@ def export_items_to_csv(items, filename='scheduled_items.csv'):
             writer.writerow(row)
 
     print(f"Exported {len(items)} items to {filename}.")
+
+def fetch_items_recursive(board_id, group_id, api_key, limit=500):
+    """
+    Recursively fetches all items from a specific group within a Monday.com board using cursor-based pagination.
+    
+    Args:
+        board_id (str): The ID of the board.
+        group_id (str): The ID of the group.
+        api_key (str): Your Monday.com API key.
+        limit (int, optional): Number of items to fetch per request. Defaults to 500.
+    
+    Returns:
+        list: A complete list of all items in the group.
+    """
+    all_items = []
+    headers = {
+        'Authorization': api_key,
+        'Content-Type': 'application/json'
+    }
+
+    # Define the fist query with the cursor method
+    initial_query = """
+    query ($boardId: [ID!]!, $groupId: [String!]!, $limit: Int!) {
+      boards(ids: $boardId) {
+        groups(ids: $groupId) {
+          id
+          title
+          items_page(limit: $limit) {
+            cursor
+            items {
+              id
+              name
+              column_values {
+                id
+                text
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    variables = {
+        "boardId": [str(board_id)],
+        "groupId": [str(group_id)],
+        "limit": limit
+    }
+
+    # Perform the first request to get the first 500 dps
+    response = requests.post(
+        "https://api.monday.com/v2",
+        json={"query": initial_query, "variables": variables},
+        headers=headers
+    )
+
+    if response.status_code != 200:
+        print(f"Initial query failed with status code {response.status_code}")
+        print("Response:", response.text)
+        sys.exit(1)
+
+    data = response.json()
+
+    if 'errors' in data:
+        print("GraphQL Errors in initial query:")
+        for error in data['errors']:
+            print(error['message'])
+        sys.exit(1)
+
+    # Extract items and cursor from the first response
+    try:
+        group = data['data']['boards'][0]['groups'][0]
+        items_page = group.get('items_page', {})
+        items = items_page.get('items', [])
+        all_items.extend(items)
+        cursor = items_page.get('cursor')
+    except (IndexError, KeyError) as e:
+        print("Error parsing initial response:", e)
+        sys.exit(1)
+
+    # Loop to fetch next pages using next_items_page method
+    while cursor:
+        next_query = """
+        query ($limit: Int!, $cursor: String!) {
+          next_items_page(limit: $limit, cursor: $cursor) {
+            cursor
+            items {
+              id
+              name
+              column_values {
+                id
+                text
+              }
+            }
+          }
+        }
+        """
+
+        next_variables = {
+            "limit": limit,
+            "cursor": cursor
+        }
+
+        response = requests.post(
+            "https://api.monday.com/v2",
+            json={"query": next_query, "variables": next_variables},
+            headers=headers
+        )
+
+        if response.status_code != 200:
+            print(f"Next items query failed with status code {response.status_code}")
+            print("Response:", response.text)
+            sys.exit(1)
+
+        data = response.json()
+
+        if 'errors' in data:
+            print("GraphQL Errors in next_items_page query:")
+            for error in data['errors']:
+                print(error['message'])
+            sys.exit(1)
+
+        # Extract items and cursor from the next_items_page response
+        try:
+            next_page = data['data']['next_items_page']
+            items = next_page.get('items', [])
+            all_items.extend(items)
+            cursor = next_page.get('cursor')
+        except (KeyError, TypeError) as e:
+            print("Error parsing next_items_page response:", e)
+            sys.exit(1)
+
+    return all_items
